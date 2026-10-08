@@ -83,26 +83,35 @@ function improveChoice(start:GradeChoice,cs:C[],goal:Goal){
  }
  return best;
 }
-function findBestGradeGroup(cs:C[],rawGoal:Goal){
- const goal={...rawGoal,maxGroup:Math.min(30,Math.max(2,Math.floor(rawGoal.maxGroup||30)))},n=cs.length;
- if(n<2)return[] as C[];
+function findFeasibleAtCount(cs:C[],goal:Goal,target:number){
+ const n=cs.length;
  const split=Math.floor(n/2),leftItems=cs.slice(0,split),rightItems=cs.slice(split),left=enumerateHalf(leftItems,goal),rightRaw=enumerateHalf(rightItems,goal);
  const right=rightRaw.map(states=>{
   const sorted=[...states].sort((a,b)=>b.auBalance-a.auBalance||b.agBalance-a.agBalance),prefixBest:number[]=[];let best=-Infinity,bestIndex=-1;
   sorted.forEach((s,i)=>{if(s.agBalance>best){best=s.agBalance;bestIndex=i}prefixBest[i]=bestIndex});return{sorted,prefixBest};
  });
- const maxCount=Math.min(goal.maxGroup,n);
- for(let target=maxCount;target>=2;target--){
-  let best:GradeChoice|null=null;
-  for(let lc=Math.max(0,target-rightItems.length);lc<=Math.min(leftItems.length,target);lc++){
-   const rc=target-lc,index=right[rc];if(!index||!index.sorted.length)continue;
-   for(const l of left[lc]){
-    const last=lastAtLeast(index.sorted,-l.auBalance);if(last<0)continue;const ri=index.prefixBest[last],rr=index.sorted[ri];if(rr.agBalance+l.agBalance<-1e-9)continue;
-    const items:C[]=[];for(let i=0;i<leftItems.length;i++)if(l.mask&2**i)items.push(leftItems[i]);for(let i=0;i<rightItems.length;i++)if(rr.mask&2**i)items.push(rightItems[i]);
-    const candidate=choice(items);if(betterChoice(candidate,best))best=candidate;
-   }
+ let best:GradeChoice|null=null;
+ for(let lc=Math.max(0,target-rightItems.length);lc<=Math.min(leftItems.length,target);lc++){
+  const rc=target-lc,index=right[rc];if(!index||!index.sorted.length)continue;
+  for(const l of left[lc]){
+   const last=lastAtLeast(index.sorted,-l.auBalance);if(last<0)continue;const ri=index.prefixBest[last],rr=index.sorted[ri];if(rr.agBalance+l.agBalance<-1e-9)continue;
+   const items:C[]=[];for(let i=0;i<leftItems.length;i++)if(l.mask&2**i)items.push(leftItems[i]);for(let i=0;i<rightItems.length;i++)if(rr.mask&2**i)items.push(rightItems[i]);
+   const candidate=choice(items);if(betterChoice(candidate,best))best=candidate;
   }
-  if(best)return improveChoice(best,cs,goal).items;
+ }
+ return best;
+}
+function findBestGradeGroup(cs:C[],rawGoal:Goal){
+ const goal={...rawGoal,maxGroup:Math.min(30,Math.max(2,Math.floor(rawGoal.maxGroup||30)))},n=cs.length;
+ if(n<2)return[] as C[];
+ for(let target=Math.min(goal.maxGroup,n);target>=2;target--){
+  let best=findFeasibleAtCount(cs,goal,target);if(!best)continue;
+  let chosenAu=goal.auMin;
+  const auTargets=[200,150,100,goal.auMin].filter(v=>v>=goal.auMin).filter((v,i,a)=>a.indexOf(v)===i).sort((a,b)=>b-a);
+  for(const auMin of auTargets){const candidate=findFeasibleAtCount(cs,{...goal,auMin},target);if(candidate){best=candidate;chosenAu=auMin;break}}
+  const agTargets=[2000,1500,1300,1000,goal.agMin].filter(v=>v>=goal.agMin).filter((v,i,a)=>a.indexOf(v)===i).sort((a,b)=>b-a);
+  for(const agMin of agTargets){const candidate=findFeasibleAtCount(cs,{...goal,auMin:chosenAu,agMin},target);if(candidate){best=candidate;break}}
+  return improveChoice(best,cs,goal).items;
  }
  return[] as C[];
 }
