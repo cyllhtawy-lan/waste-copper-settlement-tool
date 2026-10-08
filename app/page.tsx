@@ -22,8 +22,6 @@ const money=(v:number)=>new Intl.NumberFormat('zh-CN',{style:'currency',currency
 const num=(v:number,d=2)=>new Intl.NumberFormat('zh-CN',{maximumFractionDigits:d}).format(v||0);
 const pct=(v:number,d=2)=>`${num(v,d)}%`;
 const tier=(a:any[],v:number,k:string)=>a.find(x=>v>=x.min)?.[k]||0;
-const auBand=(v:number)=>v>=200?3:v>=150?2:v>=100?1:0;
-const agBand=(v:number)=>v>=2000?4:v>=1500?3:v>=1300?2:v>=1000?1:0;
 const auBandLabel=(v:number)=>v>=200?'Au ≥ 200':v>=150?'Au ≥ 150':v>=100?'Au ≥ 100':'未到Au 100档';
 const agBandLabel=(v:number)=>v>=2000?'Ag ≥ 2000':v>=1500?'Ag ≥ 1500':v>=1300?'Ag ≥ 1300':v>=1000?'Ag ≥ 1000':'未到Ag 1000档';
 
@@ -44,7 +42,7 @@ function calc(a:C[],r:R,unified=true):X{
 }
 function group(a:C[],r:R,goal:Goal):G{
  const x=calc(a,r),solo=a.reduce((s,c)=>s+calc([c],r,false).total,0);
- return{ids:a.map(c=>c.id),x,solo,gain:x.total-solo,rate:solo?(x.total-solo)/solo*100:0,reason:`覆盖 ${a.length} 柜并同时满足 Au ≥ ${goal.auMin}、Ag ≥ ${goal.agMin}`};
+ return{ids:a.map(c=>c.id),x,solo,gain:x.total-solo,rate:solo?(x.total-solo)/solo*100:0,reason:`覆盖 ${a.length} 柜并同时满足 Au ≥ ${goal.auMin}、Ag ≥ ${goal.agMin}；同柜数时优先贴近门槛`};
 }
 
 function enumerateHalf(items:C[],goal:Goal){
@@ -58,13 +56,15 @@ function enumerateHalf(items:C[],goal:Goal){
 }
 function lastAtLeast(sorted:HalfState[],need:number){let lo=0,hi=sorted.length-1,ans=-1;while(lo<=hi){const mid=(lo+hi)>>1;if(sorted[mid].auBalance>=need){ans=mid;lo=mid+1}else hi=mid-1}return ans}
 function choice(items:C[]):GradeChoice{const g=grades(items);return{items,count:items.length,tons:g.tons,au:g.au,ag:g.ag}}
-function betterChoice(a:GradeChoice,b:GradeChoice|null){
+function excess(a:GradeChoice,goal:Goal){const au=Math.max(0,a.au-goal.auMin)/Math.max(goal.auMin,1),ag=Math.max(0,a.ag-goal.agMin)/Math.max(goal.agMin,1);return{au,ag,total:au+ag,worst:Math.max(au,ag)}}
+function betterChoice(a:GradeChoice,b:GradeChoice|null,goal:Goal){
  if(!b)return true;
  if(a.count!==b.count)return a.count>b.count;
- if(auBand(a.au)!==auBand(b.au))return auBand(a.au)>auBand(b.au);
- if(agBand(a.ag)!==agBand(b.ag))return agBand(a.ag)>agBand(b.ag);
- if(Math.abs(a.au-b.au)>.000001)return a.au>b.au;
- if(Math.abs(a.ag-b.ag)>.000001)return a.ag>b.ag;
+ const ax=excess(a,goal),bx=excess(b,goal);
+ if(Math.abs(ax.total-bx.total)>.000001)return ax.total<bx.total;
+ if(Math.abs(ax.worst-bx.worst)>.000001)return ax.worst<bx.worst;
+ if(Math.abs(ax.au-bx.au)>.000001)return ax.au<bx.au;
+ if(Math.abs(ax.ag-bx.ag)>.000001)return ax.ag<bx.ag;
  if(Math.abs(a.tons-b.tons)>.000001)return a.tons>b.tons;
  return a.items.map(x=>x.no).join('|')<b.items.map(x=>x.no).join('|');
 }
@@ -73,11 +73,11 @@ function improveChoice(start:GradeChoice,cs:C[],goal:Goal){
  let best=start;
  for(let pass=0;pass<3;pass++){
   let changed=false,inside=new Set(best.items.map(c=>c.id)),outside=cs.filter(c=>!inside.has(c.id));
-  for(let i=0;i<best.items.length;i++)for(const add of outside){const next=[...best.items.slice(0,i),...best.items.slice(i+1),add];if(meets(next,goal)){const candidate=choice(next);if(betterChoice(candidate,best)){best=candidate;changed=true}}}
+  for(let i=0;i<best.items.length;i++)for(const add of outside){const next=[...best.items.slice(0,i),...best.items.slice(i+1),add];if(meets(next,goal)){const candidate=choice(next);if(betterChoice(candidate,best,goal)){best=candidate;changed=true}}}
   if(changed)continue;
   inside=new Set(best.items.map(c=>c.id));outside=cs.filter(c=>!inside.has(c.id));
   outer:for(let i=0;i<best.items.length;i++)for(let j=i+1;j<best.items.length;j++)for(let a=0;a<outside.length;a++)for(let b=a+1;b<outside.length;b++){
-   const next=best.items.filter((_,k)=>k!==i&&k!==j).concat(outside[a],outside[b]);if(!meets(next,goal))continue;const candidate=choice(next);if(betterChoice(candidate,best)){best=candidate;changed=true;break outer}
+   const next=best.items.filter((_,k)=>k!==i&&k!==j).concat(outside[a],outside[b]);if(!meets(next,goal))continue;const candidate=choice(next);if(betterChoice(candidate,best,goal)){best=candidate;changed=true;break outer}
   }
   if(!changed)break;
  }
@@ -96,7 +96,7 @@ function findFeasibleAtCount(cs:C[],goal:Goal,target:number){
   for(const l of left[lc]){
    const last=lastAtLeast(index.sorted,-l.auBalance);if(last<0)continue;const ri=index.prefixBest[last],rr=index.sorted[ri];if(rr.agBalance+l.agBalance<-1e-9)continue;
    const items:C[]=[];for(let i=0;i<leftItems.length;i++)if(l.mask&2**i)items.push(leftItems[i]);for(let i=0;i<rightItems.length;i++)if(rr.mask&2**i)items.push(rightItems[i]);
-   const candidate=choice(items);if(betterChoice(candidate,best))best=candidate;
+   const candidate=choice(items);if(betterChoice(candidate,best,goal))best=candidate;
   }
  }
  return best;
@@ -105,12 +105,7 @@ function findBestGradeGroup(cs:C[],rawGoal:Goal){
  const goal={...rawGoal,maxGroup:Math.min(30,Math.max(2,Math.floor(rawGoal.maxGroup||30)))},n=cs.length;
  if(n<2)return[] as C[];
  for(let target=Math.min(goal.maxGroup,n);target>=2;target--){
-  let best=findFeasibleAtCount(cs,goal,target);if(!best)continue;
-  let chosenAu=goal.auMin;
-  const auTargets=[200,150,100,goal.auMin].filter(v=>v>=goal.auMin).filter((v,i,a)=>a.indexOf(v)===i).sort((a,b)=>b-a);
-  for(const auMin of auTargets){const candidate=findFeasibleAtCount(cs,{...goal,auMin},target);if(candidate){best=candidate;chosenAu=auMin;break}}
-  const agTargets=[2000,1500,1300,1000,goal.agMin].filter(v=>v>=goal.agMin).filter((v,i,a)=>a.indexOf(v)===i).sort((a,b)=>b-a);
-  for(const agMin of agTargets){const candidate=findFeasibleAtCount(cs,{...goal,auMin:chosenAu,agMin},target);if(candidate){best=candidate;break}}
+  const best=findFeasibleAtCount(cs,goal,target);if(!best)continue;
   return improveChoice(best,cs,goal).items;
  }
  return[] as C[];
@@ -150,7 +145,7 @@ function Title({over,children,right}:{over:string;children:any;right?:any}){retu
 function Kpi({label,value,sub,good=false}:any){return <article className={`kpi ${good?'good':''}`}><span>{label}</span><strong>{value}</strong><small>{sub}</small></article>}
 function PlanView({plan,cs}:{plan:P;cs:C[]}){
  const selected=plan.main?cs.filter(c=>plan.main!.ids.includes(c.id)):[];
- return <><Title over="本批推荐" right={<span className="status"><CheckCircle2 size={16}/>已全局计算 {cs.length} 柜</span>}>金银达标最大覆盖方案</Title><section className="kpis"><Kpi good label="达标入组" value={`${plan.covered} / ${cs.length} 柜`} sub={`覆盖率 ${pct(plan.coverage,0)}`}/><Kpi label="组合黄金品位" value={plan.main?`${num(plan.main.x.au,2)} g/t`:'—'} sub={plan.main?`${auBandLabel(plan.main.x.au)} · 超目标 ${num(plan.main.x.au-plan.goal.auMin,2)}`:`目标 Au ≥ ${plan.goal.auMin}`}/><Kpi label="组合白银品位" value={plan.main?`${num(plan.main.x.ag,2)} g/t`:'—'} sub={plan.main?`${agBandLabel(plan.main.x.ag)} · 超目标 ${num(plan.main.x.ag-plan.goal.agMin,2)}`:`目标 Ag ≥ ${plan.goal.agMin}`}/><Kpi label="组合 / 剩余" value={`${plan.main?1:0} / ${cs.length-plan.covered}`} sub="柜数优先，品位用于同柜数比较"/></section><div className="cards">{plan.main?<article className="group main-group"><div className="grouphead"><div><small>主组合 · 全局最大覆盖</small><h3>{selected.map(c=>c.no).join(' + ')}</h3></div><b>{plan.covered} 柜达标</b></div><div className="grades"><span><b>{num(plan.main.x.au,2)}</b>Au g/t</span><span><b>{num(plan.main.x.ag,2)}</b>Ag g/t</span><span><b>{num(plan.main.x.tons,2)}</b>总吨数</span><span><b>{num(plan.main.x.units,0)}</b>单位数</span></div><p className="reason"><CheckCircle2 size={14}/>{plan.main.reason}；不存在能再多纳入一柜且同时达标的方案。</p><footer><span>组合结算 {money(plan.main.x.total)}</span><span>单柜基准 {money(plan.main.solo)}</span><b>金额仅供参考 {plan.main.gain>=0?'+':''}{money(plan.main.gain)}</b></footer></article>:<div className="empty"><AlertTriangle/><h3>暂时没有达标组合</h3><p>至少需要2柜，并同时达到 Au ≥ {plan.goal.auMin}、Ag ≥ {plan.goal.agMin}。</p></div>}<LeftList title={plan.hold.length?'留待下批':'单独结算'} ids={plan.hold.length?plan.hold:plan.single} cs={cs} plan={plan}/></div></>;
+ return <><Title over="本批推荐" right={<span className="status"><CheckCircle2 size={16}/>已全局计算 {cs.length} 柜</span>}>金银达标最大覆盖方案</Title><section className="kpis"><Kpi good label="达标入组" value={`${plan.covered} / ${cs.length} 柜`} sub={`覆盖率 ${pct(plan.coverage,0)}`}/><Kpi label="组合黄金品位" value={plan.main?`${num(plan.main.x.au,2)} g/t`:'—'} sub={plan.main?`${auBandLabel(plan.main.x.au)} · 仅超目标 ${num(plan.main.x.au-plan.goal.auMin,2)}`:`目标 Au ≥ ${plan.goal.auMin}`}/><Kpi label="组合白银品位" value={plan.main?`${num(plan.main.x.ag,2)} g/t`:'—'} sub={plan.main?`${agBandLabel(plan.main.x.ag)} · 仅超目标 ${num(plan.main.x.ag-plan.goal.agMin,2)}`:`目标 Ag ≥ ${plan.goal.agMin}`}/><Kpi label="组合 / 剩余" value={`${plan.main?1:0} / ${cs.length-plan.covered}`} sub="柜数优先，同柜数选择最贴近门槛"/></section><div className="cards">{plan.main?<article className="group main-group"><div className="grouphead"><div><small>主组合 · 全局最大覆盖</small><h3>{selected.map(c=>c.no).join(' + ')}</h3></div><b>{plan.covered} 柜达标</b></div><div className="grades"><span><b>{num(plan.main.x.au,2)}</b>Au g/t</span><span><b>{num(plan.main.x.ag,2)}</b>Ag g/t</span><span><b>{num(plan.main.x.tons,2)}</b>总吨数</span><span><b>{num(plan.main.x.units,0)}</b>单位数</span></div><p className="reason"><CheckCircle2 size={14}/>{plan.main.reason}；不存在能再多纳入一柜且同时达标的方案。</p><footer><span>组合结算 {money(plan.main.x.total)}</span><span>单柜基准 {money(plan.main.solo)}</span><b>金额仅供参考 {plan.main.gain>=0?'+':''}{money(plan.main.gain)}</b></footer></article>:<div className="empty"><AlertTriangle/><h3>暂时没有达标组合</h3><p>至少需要2柜，并同时达到 Au ≥ {plan.goal.auMin}、Ag ≥ {plan.goal.agMin}。</p></div>}<LeftList title={plan.hold.length?'留待下批':'单独结算'} ids={plan.hold.length?plan.hold:plan.single} cs={cs} plan={plan}/></div></>;
 }
 function LeftList({title,ids,cs,plan}:{title:string;ids:string[];cs:C[];plan:P}){return <article className="list"><div className="listhead"><h3>{title}</h3><span>{ids.length} 柜</span></div>{ids.length?ids.map(id=>{const c=cs.find(x=>x.id===id)!;return <div className="listrow left-reason" key={id}><div><b>{c.no}</b><small>Au {num(c.au,2)} · Ag {num(c.ag,2)}</small></div><span>{plan.leftReasons[id]}</span></div>}):<p className="muted">全部货柜已进入达标组合</p>}</article>}
 
