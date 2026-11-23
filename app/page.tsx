@@ -14,9 +14,12 @@ type Disposition='single'|'hold';
 type P={groups:G[];single:string[];hold:string[];base:number;total:number;gain:number;covered:number;coverage:number;payableAu:number;payableAg:number;goal:Goal;leftReasons:Record<string,string>};
 type HalfState={mask:number;count:number;tons:number;auMass:number;agMass:number;auBalance:number;agBalance:number};
 type GradeChoice={items:C[];count:number;tons:number;au:number;ag:number};
+type FeasibilityIndex={leftItems:C[];rightItems:C[];left:HalfState[][];right:{sorted:HalfState[];prefixBest:number[]}[]};
+type FractionalUpperIndex={positiveBalance:number[];positiveValue:number[];negative:{cost:number;value:number}[][]};
 
+const MAX_CONTAINERS=40;
 const R0:R={cuHigh:75,cuLow:70,p1:200,p2:500,niGate:3,snGate:1,snHighGate:2,snDeduction:.5,unitBase:2000,specialBase:2500,specialOn:false,specialCu:30,specialAg:2000,auFees:[{min:200,fee:0},{min:150,fee:1},{min:100,fee:2},{min:70,fee:3},{min:50,fee:4},{min:40,fee:5},{min:30,fee:6},{min:20,fee:10},{min:10,fee:15},{min:5,fee:30}],auRates:[{min:100,rate:.96},{min:50,rate:.955},{min:30,rate:.95},{min:20,rate:.94},{min:5,rate:.935}],agRates:[{min:2000,rate:.92},{min:1500,rate:.91},{min:1300,rate:.90},{min:1000,rate:.89}],pdFees:[{min:30,fee:17},{min:20,fee:20},{min:10,fee:23},{min:5,fee:35},{min:3,fee:60}]};
-const GOAL0:Goal={auMin:100,agMin:1000,maxGroup:30};
+const GOAL0:Goal={auMin:100,agMin:1000,maxGroup:MAX_CONTAINERS};
 const demo:C[]=[['1','A01',24.8,68.4,92,1120,3.2,.7,4.2,78500,790,9.2,310,'Au接近100档'],['2','A02',25.2,80.6,115,820,1.1,1.3,6.1,78300,792,9.1,308,'低档锡扣0.5%'],['3','A03',23.9,72.1,144,1680,2.9,.9,2.6,78600,788,9.3,312,'高金银柜'],['4','A04',24.4,76.8,82,960,4.4,2.2,11,78100,795,9.15,305,'高档锡全额并入铜'],['5','A05',25,69.2,158,1380,1.4,.5,3.1,78900,791,9.25,315,'高金易转手'],['6','A06',24.6,78.4,74,1096,2.1,.8,1.8,78400,789,9,309,'普通高铜柜']].map(a=>({id:a[0]as string,date:'2026-09-03',no:a[1]as string,tons:a[2]as number,cu:a[3]as number,au:a[4]as number,ag:a[5]as number,ni:a[6]as number,sn:a[7]as number,pd:a[8]as number,cuPrice:a[9]as number,auPrice:a[10]as number,agPrice:a[11]as number,pdPrice:a[12]as number,note:a[13]as string}));
 
 const money=(v:number)=>new Intl.NumberFormat('zh-CN',{style:'currency',currency:'CNY',maximumFractionDigits:0}).format(v||0);
@@ -69,15 +72,19 @@ function enumerateHalf(items:C[],goal:Goal){
 function lastAtLeast(sorted:HalfState[],need:number){let lo=0,hi=sorted.length-1,ans=-1;while(lo<=hi){const mid=(lo+hi)>>1;if(sorted[mid].auBalance>=need){ans=mid;lo=mid+1}else hi=mid-1}return ans}
 function choice(items:C[]):GradeChoice{const g=grades(items);return{items,count:items.length,tons:g.tons,au:g.au,ag:g.ag}}
 function excess(a:GradeChoice,goal:Goal){const au=Math.max(0,a.au-goal.auMin)/Math.max(goal.auMin,1),ag=Math.max(0,a.ag-goal.agMin)/Math.max(goal.agMin,1);return{au,ag,total:au+ag,worst:Math.max(au,ag)}}
-function betterChoice(a:GradeChoice,b:GradeChoice|null,goal:Goal){
- if(!b)return true;
- if(a.count!==b.count)return a.count>b.count;
+function compareChoiceMetrics(a:GradeChoice,b:GradeChoice|null,goal:Goal){
+ if(!b)return 1;
+ if(a.count!==b.count)return a.count>b.count?1:-1;
  const ax=excess(a,goal),bx=excess(b,goal);
- if(Math.abs(ax.total-bx.total)>.000001)return ax.total<bx.total;
- if(Math.abs(ax.worst-bx.worst)>.000001)return ax.worst<bx.worst;
- if(Math.abs(ax.au-bx.au)>.000001)return ax.au<bx.au;
- if(Math.abs(ax.ag-bx.ag)>.000001)return ax.ag<bx.ag;
- if(Math.abs(a.tons-b.tons)>.000001)return a.tons>b.tons;
+ if(Math.abs(ax.total-bx.total)>.000001)return ax.total<bx.total?1:-1;
+ if(Math.abs(ax.worst-bx.worst)>.000001)return ax.worst<bx.worst?1:-1;
+ if(Math.abs(ax.au-bx.au)>.000001)return ax.au<bx.au?1:-1;
+ if(Math.abs(ax.ag-bx.ag)>.000001)return ax.ag<bx.ag?1:-1;
+ if(Math.abs(a.tons-b.tons)>.000001)return a.tons>b.tons?1:-1;
+ return 0;
+}
+function betterChoice(a:GradeChoice,b:GradeChoice|null,goal:Goal){
+ const comparison=compareChoiceMetrics(a,b,goal);if(comparison)return comparison>0;
  return a.items.map(x=>x.no).join('|')<b.items.map(x=>x.no).join('|');
 }
 function meets(items:C[],goal:Goal){const g=grades(items);return items.length>=2&&g.au+1e-9>=goal.auMin&&g.ag+1e-9>=goal.agMin}
@@ -95,29 +102,34 @@ function improveChoice(start:GradeChoice,cs:C[],goal:Goal){
  }
  return best;
 }
-function findFeasibleAtCount(cs:C[],goal:Goal,target:number){
- const n=cs.length;
- const split=Math.floor(n/2),leftItems=cs.slice(0,split),rightItems=cs.slice(split),left=enumerateHalf(leftItems,goal),rightRaw=enumerateHalf(rightItems,goal);
+function buildFeasibilityIndex(cs:C[],goal:Goal):FeasibilityIndex{
+ const split=Math.floor(cs.length/2),leftItems=cs.slice(0,split),rightItems=cs.slice(split),left=enumerateHalf(leftItems,goal),rightRaw=enumerateHalf(rightItems,goal);
  const right=rightRaw.map(states=>{
   const sorted=[...states].sort((a,b)=>b.auBalance-a.auBalance||b.agBalance-a.agBalance),prefixBest:number[]=[];let best=-Infinity,bestIndex=-1;
   sorted.forEach((s,i)=>{if(s.agBalance>best){best=s.agBalance;bestIndex=i}prefixBest[i]=bestIndex});return{sorted,prefixBest};
  });
+ return{leftItems,rightItems,left,right};
+}
+function findFeasibleAtCount(cs:C[],goal:Goal,target:number,cached?:FeasibilityIndex){
+ const index=cached||buildFeasibilityIndex(cs,goal),{leftItems,rightItems,left,right}=index;
  let best:GradeChoice|null=null;
  for(let lc=Math.max(0,target-rightItems.length);lc<=Math.min(leftItems.length,target);lc++){
   const rc=target-lc,index=right[rc];if(!index||!index.sorted.length)continue;
   for(const l of left[lc]){
    const last=lastAtLeast(index.sorted,-l.auBalance);if(last<0)continue;const ri=index.prefixBest[last],rr=index.sorted[ri];if(rr.agBalance+l.agBalance<-1e-9)continue;
-   const items:C[]=[];for(let i=0;i<leftItems.length;i++)if(l.mask&2**i)items.push(leftItems[i]);for(let i=0;i<rightItems.length;i++)if(rr.mask&2**i)items.push(rightItems[i]);
-   const candidate=choice(items);if(betterChoice(candidate,best,goal))best=candidate;
+   const tons=l.tons+rr.tons,summary:GradeChoice={items:[],count:target,tons,au:(l.auMass+rr.auMass)/tons,ag:(l.agMass+rr.agMass)/tons},comparison=compareChoiceMetrics(summary,best,goal);if(comparison<0)continue;
+   if(comparison>0){const items:C[]=[];for(let i=0;i<leftItems.length;i++)if(l.mask&2**i)items.push(leftItems[i]);for(let i=0;i<rightItems.length;i++)if(rr.mask&2**i)items.push(rightItems[i]);best=choice(items);continue}
+   const items:C[]=[];for(let i=0;i<leftItems.length;i++)if(l.mask&2**i)items.push(leftItems[i]);for(let i=0;i<rightItems.length;i++)if(rr.mask&2**i)items.push(rightItems[i]);const candidate=choice(items);if(betterChoice(candidate,best,goal))best=candidate;
   }
  }
  return best;
 }
 function findBestGradeGroup(cs:C[],rawGoal:Goal){
- const goal={...rawGoal,maxGroup:Math.min(30,Math.max(2,Math.floor(rawGoal.maxGroup||30)))},n=cs.length;
+ const goal={...rawGoal,maxGroup:Math.min(MAX_CONTAINERS,Math.max(2,Math.floor(rawGoal.maxGroup||MAX_CONTAINERS)))},n=cs.length;
  if(n<2)return[] as C[];
+ const index=buildFeasibilityIndex(cs,goal);
  for(let target=Math.min(goal.maxGroup,n);target>=2;target--){
-  const best=findFeasibleAtCount(cs,goal,target);if(!best)continue;
+  const best=findFeasibleAtCount(cs,goal,target,index);if(!best)continue;
   return improveChoice(best,cs,goal).items;
  }
  return[] as C[];
@@ -126,25 +138,41 @@ function payableChoice(items:C[],r:R,goal:Goal){
  const g=grades(items),m=metrics(g,r),gap=excess(choice(items),goal);
  return{items,au:g.tons*g.au*m.auRate,ag:g.tons*g.ag*m.agRate,count:items.length,gap};
 }
+function payableSummary(tons:number,auMass:number,agMass:number,count:number,r:R,goal:Goal){const au=auMass/tons,ag=agMass/tons,m=metrics({tons,cu:0,au,ag,ni:0,sn:0,pd:0},r),gap=excess({items:[],count,tons,au,ag},goal);return{items:[] as C[],au:auMass*m.auRate,ag:agMass*m.agRate,count,gap}}
+function comparePayableMetrics(a:ReturnType<typeof payableChoice>,b:ReturnType<typeof payableChoice>|null){
+ if(!b)return 1;
+ if(Math.abs(a.au-b.au)>.000001)return a.au>b.au?1:-1;
+ if(Math.abs(a.ag-b.ag)>.000001)return a.ag>b.ag?1:-1;
+ if(a.count!==b.count)return a.count>b.count?1:-1;
+ if(Math.abs(a.gap.total-b.gap.total)>.000001)return a.gap.total<b.gap.total?1:-1;
+ return 0;
+}
 function betterPayableChoice(a:ReturnType<typeof payableChoice>,b:ReturnType<typeof payableChoice>|null){
- if(!b)return true;
- if(Math.abs(a.au-b.au)>.000001)return a.au>b.au;
- if(Math.abs(a.ag-b.ag)>.000001)return a.ag>b.ag;
- if(a.count!==b.count)return a.count>b.count;
- if(Math.abs(a.gap.total-b.gap.total)>.000001)return a.gap.total<b.gap.total;
+ const comparison=comparePayableMetrics(a,b);if(comparison)return comparison>0;
  return a.items.map(x=>x.no).join('|')<b.items.map(x=>x.no).join('|');
 }
+function buildFractionalUpperIndex(items:C[],balance:(c:C)=>number):FractionalUpperIndex{
+ const positiveBalance=Array(items.length+1).fill(0),positiveValue=Array(items.length+1).fill(0),negative:Array<{cost:number;value:number}[]> =Array.from({length:items.length+1},()=>[]);
+ for(let start=items.length-1;start>=0;start--){const c=items[start],b=balance(c),v=c.tons*c.au;positiveBalance[start]=positiveBalance[start+1];positiveValue[start]=positiveValue[start+1];negative[start]=negative[start+1].slice();if(b>=0){positiveBalance[start]+=b;positiveValue[start]+=v}else{negative[start].push({cost:-b,value:v});negative[start].sort((a,z)=>z.value/z.cost-a.value/a.cost)}}
+ return{positiveBalance,positiveValue,negative};
+}
+function constrainedAuMassUpper(index:FractionalUpperIndex,start:number,currentBalance:number){
+ let capacity=currentBalance+index.positiveBalance[start],value=index.positiveValue[start];
+ if(capacity<-1e-9)return-Infinity;
+ for(const item of index.negative[start]){if(capacity>=item.cost){capacity-=item.cost;value+=item.value}else{value+=item.value*Math.max(capacity,0)/item.cost;break}}
+ return value+1e-7;
+}
 function findBestPayableGroup(cs:C[],rawGoal:Goal,r:R){
- const goal={...rawGoal,maxGroup:Math.min(30,Math.max(2,Math.floor(rawGoal.maxGroup||30)))},ordered=[...cs].sort((a,b)=>b.tons*b.au-a.tons*a.au||b.tons*b.ag-a.tons*a.ag),n=ordered.length;
+ const goal={...rawGoal,maxGroup:Math.min(MAX_CONTAINERS,Math.max(2,Math.floor(rawGoal.maxGroup||MAX_CONTAINERS)))},ordered=[...cs].sort((a,b)=>b.tons*b.au-a.tons*a.au||b.tons*b.ag-a.tons*a.ag),n=ordered.length;
  if(n<2)return[] as C[];
  const suffixAu=Array(n+1).fill(0),suffixAg=Array(n+1).fill(0),suffixAuHelp=Array(n+1).fill(0),suffixAgHelp=Array(n+1).fill(0);
  for(let i=n-1;i>=0;i--){const c=ordered[i],auBalance=c.tons*(c.au-goal.auMin),agBalance=c.tons*(c.ag-goal.agMin);suffixAu[i]=suffixAu[i+1]+c.tons*c.au;suffixAg[i]=suffixAg[i+1]+c.tons*c.ag;suffixAuHelp[i]=suffixAuHelp[i+1]+Math.max(0,auBalance);suffixAgHelp[i]=suffixAgHelp[i+1]+Math.max(0,agBalance)}
- const maxAuRate=Math.max(0,...r.auRates.map(x=>x.rate)),maxAgRate=Math.max(.89,...r.agRates.map(x=>x.rate));let best:ReturnType<typeof payableChoice>|null=null;const picked:C[]=[];
+ const maxAuRate=Math.max(0,...r.auRates.map(x=>x.rate)),maxAgRate=Math.max(.89,...r.agRates.map(x=>x.rate)),auUpper=buildFractionalUpperIndex(ordered,c=>c.tons*(c.au-goal.auMin)),agUpper=buildFractionalUpperIndex(ordered,c=>c.tons*(c.ag-goal.agMin));let best:ReturnType<typeof payableChoice>|null=null;const picked:C[]=[];
  const visit=(i:number,tons:number,auMass:number,agMass:number,auBalance:number,agBalance:number)=>{
   if(picked.length>goal.maxGroup||picked.length+n-i<2)return;
   if(auBalance+suffixAuHelp[i]<-1e-9||agBalance+suffixAgHelp[i]<-1e-9)return;
-  if(best){const upperAu=(auMass+suffixAu[i])*maxAuRate;if(upperAu<best.au-.000001)return;if(Math.abs(upperAu-best.au)<=.000001&&(agMass+suffixAg[i])*maxAgRate<best.ag-.000001)return}
-  if(picked.length>=2&&auBalance>=-1e-9&&agBalance>=-1e-9){const candidate=payableChoice([...picked],r,goal);if(betterPayableChoice(candidate,best))best=candidate}
+  if(best){const upperAu=(auMass+Math.min(suffixAu[i],constrainedAuMassUpper(auUpper,i,auBalance),constrainedAuMassUpper(agUpper,i,agBalance)))*maxAuRate;if(upperAu<best.au-.000001)return;if(Math.abs(upperAu-best.au)<=.000001&&(agMass+suffixAg[i])*maxAgRate<best.ag-.000001)return}
+  if(picked.length>=2&&auBalance>=-1e-9&&agBalance>=-1e-9){const summary=payableSummary(tons,auMass,agMass,picked.length,r,goal),comparison=comparePayableMetrics(summary,best);if(comparison>0)best={...summary,items:[...picked]};else if(comparison===0){const candidate={...summary,items:[...picked]};if(betterPayableChoice(candidate,best))best=candidate}}
   if(i===n||picked.length===goal.maxGroup)return;
   const c=ordered[i];picked.push(c);visit(i+1,tons+c.tons,auMass+c.tons*c.au,agMass+c.tons*c.ag,auBalance+c.tons*(c.au-goal.auMin),agBalance+c.tons*(c.ag-goal.agMin));picked.pop();visit(i+1,tons,auMass,agMass,auBalance,agBalance);
  };
@@ -171,18 +199,19 @@ function betterPartition(a:ReturnType<typeof partitionQuality>,b:ReturnType<type
 }
 function bestSplit(items:C[],goal:Goal,r:R){
  if(items.length<4)return null;
- const total=grades(items),totalAu=total.tons*(total.au-goal.auMin),totalAg=total.tons*(total.ag-goal.agMin);let best:C[][]|null=null,bestScore:ReturnType<typeof partitionQuality>|null=null,bestCoefficient:ReturnType<typeof coefficientQuality>|null=null;
- const consider=(left:C[])=>{if(left.length<2||left.length>items.length-2)return;const ids=new Set(left.map(c=>c.id)),right=items.filter(c=>!ids.has(c.id));if(!meets(left,goal)||!meets(right,goal))return;const parts=[left,right],score=partitionQuality(parts,goal),coefficient=coefficientQuality(parts,r);if(!bestCoefficient||betterCoefficient(coefficient,bestCoefficient)||(!betterCoefficient(bestCoefficient,coefficient)&&bestScore&&betterPartition(score,bestScore))){best=parts;bestScore=score;bestCoefficient=coefficient}};
+ const total=grades(items),totalAuMass=total.tons*total.au,totalAgMass=total.tons*total.ag,totalAu=totalAuMass-goal.auMin*total.tons,totalAg=totalAgMass-goal.agMin*total.tons;let best:C[][]|null=null,bestScore:ReturnType<typeof partitionQuality>|null=null,bestCoefficient:ReturnType<typeof coefficientQuality>|null=null;
+ const considerSummary=(count:number,tons:number,auMass:number,agMass:number,materialize:()=>C[])=>{if(count<2||count>items.length-2||tons<=0||total.tons-tons<=0)return;const auBalance=auMass-goal.auMin*tons,agBalance=agMass-goal.agMin*tons;if(auBalance<-1e-9||agBalance<-1e-9||auBalance>totalAu+1e-9||agBalance>totalAg+1e-9)return;const leftChoice:GradeChoice={items:[],count,tons,au:auMass/tons,ag:agMass/tons},rightTons=total.tons-tons,rightChoice:GradeChoice={items:[],count:items.length-count,tons:rightTons,au:(totalAuMass-auMass)/rightTons,ag:(totalAgMass-agMass)/rightTons},leftMetrics=metrics({tons,cu:0,au:leftChoice.au,ag:leftChoice.ag,ni:0,sn:0,pd:0},r),rightMetrics=metrics({tons:rightTons,cu:0,au:rightChoice.au,ag:rightChoice.ag,ni:0,sn:0,pd:0},r),coefficient={auPayable:auMass*leftMetrics.auRate+(totalAuMass-auMass)*rightMetrics.auRate,agPayable:agMass*leftMetrics.agRate+(totalAgMass-agMass)*rightMetrics.agRate},gaps=[excess(leftChoice,goal),excess(rightChoice,goal)],score={worst:Math.max(gaps[0].worst,gaps[1].worst),average:(gaps[0].total*count+gaps[1].total*(items.length-count))/items.length,groups:2};if(!bestCoefficient||betterCoefficient(coefficient,bestCoefficient)||(!betterCoefficient(bestCoefficient,coefficient)&&bestScore&&betterPartition(score,bestScore))){const left=materialize(),ids=new Set(left.map(c=>c.id));best=[left,items.filter(c=>!ids.has(c.id))];bestScore=score;bestCoefficient=coefficient}};
+ const consider=(left:C[])=>{const g=grades(left);considerSummary(left.length,g.tons,g.tons*g.au,g.tons*g.ag,()=>left)};
  const maxSmall=Math.min(4,Math.floor(items.length/2));
  for(let size=2;size<=maxSmall;size++){
   const picked:number[]=[];
   const walk=(start:number,need:number,tons:number,auMass:number,agMass:number)=>{
-   if(!need){const auBalance=auMass-goal.auMin*tons,agBalance=agMass-goal.agMin*tons;if(auBalance>=-1e-9&&agBalance>=-1e-9&&auBalance<=totalAu+1e-9&&agBalance<=totalAg+1e-9)consider(picked.map(i=>items[i]));return}
+   if(!need){considerSummary(size,tons,auMass,agMass,()=>picked.map(i=>items[i]));return}
    for(let i=start;i<=items.length-need;i++){const c=items[i];picked.push(i);walk(i+1,need-1,tons+c.tons,auMass+c.tons*c.au,agMass+c.tons*c.ag);picked.pop()}
   };
   walk(0,size,0,0,0);
  }
- if(items.length>8){const strategic=[Math.floor(items.length/3),Math.floor(items.length/2),Math.ceil(items.length/2)];for(const size of [...new Set(strategic.filter(x=>x>=2&&x<=items.length-2))]){const candidate=findFeasibleAtCount(items,goal,size);if(candidate)consider(candidate.items)}}
+ if(items.length>8){const index=buildFeasibilityIndex(items,goal),strategic=[Math.floor(items.length/3),Math.floor(items.length/2),Math.ceil(items.length/2)];for(const size of [...new Set(strategic.filter(x=>x>=2&&x<=items.length-2))]){const candidate=findFeasibleAtCount(items,goal,size,index);if(candidate)consider(candidate.items)}}
  return best;
 }
 function partitionSelected(selected:C[],goal:Goal,r:R){
@@ -208,7 +237,7 @@ export default function App(){
  const plan=useMemo(()=>optimize(cs,r,goal,disposition),[cs,r,goal,disposition]);
  useEffect(()=>{try{const s=JSON.parse(localStorage.getItem('waste-copper-state')||'null');if(s){if(Array.isArray(s.cs))setCs(s.cs);if(s.r)setR({...R0,...s.r,auRates:s.rulesVersion>=2?s.r.auRates:R0.auRates});const loaded={...GOAL0,...s.goal};setGoal(loaded);setGoalDraft(loaded);if(s.disposition)setDisposition(s.disposition)}}catch{}},[]);
  useEffect(()=>localStorage.setItem('waste-copper-state',JSON.stringify({cs,r,goal,disposition,rulesVersion:4})),[cs,r,goal,disposition]);
- function applyGoal(){const next={auMin:Math.max(0,Number(goalDraft.auMin)||100),agMin:Math.max(0,Number(goalDraft.agMin)||1000),maxGroup:Math.min(30,Math.max(2,Math.floor(Number(goalDraft.maxGroup)||30)))};setGoalDraft(next);setGoal(next)}
+ function applyGoal(){const next={auMin:Math.max(0,Number(goalDraft.auMin)||100),agMin:Math.max(0,Number(goalDraft.agMin)||1000),maxGroup:Math.min(MAX_CONTAINERS,Math.max(2,Math.floor(Number(goalDraft.maxGroup)||MAX_CONTAINERS)))};setGoalDraft(next);setGoal(next)}
  function exportExcel(){
   const wb=XLSX.utils.book_new(),add=(n:string,rows:any[])=>XLSX.utils.book_append_sheet(wb,XLSX.utils.json_to_sheet(rows),n),ex=(x:X)=>({吨数:x.tons,Cu:x.cu,Au:x.au,Ag:x.ag,Ni:x.ni,Sn:x.sn,Pd:x.pd,计价锡品位:x.payableSn,锡计价方式:x.snMode==='copper-full'?'完整Sn并入铜':x.snMode==='copper-deducted'?'Sn减0.5%并入铜':'不计价',有效铜:x.effectiveCu,单位数:x.units,铜加工费:x.cuFee,铜扣款:x.penalty,金加工费:x.auFee,金系数:x.auRate,银系数:x.agRate,钯加工费:x.pdFee,铜价值:x.cuValue,锡折铜价值:x.snValue,金价值:x.auValue,银价值:x.agValue,钯价值:x.pdValue,总价值:x.total}),selectedIds=new Set(plan.groups.flatMap(g=>g.ids)),selected=cs.filter(c=>selectedIds.has(c.id)),selectedGrade=grades(selected);
   add('批次信息',[{优化目标:'不计其他扣款，先最大化计价黄金，再最大化计价白银',黄金最低品位:goal.auMin,白银最低品位:goal.agMin,本批最多入组柜数:goal.maxGroup,每组最少柜数:2,组合数量限制:'不限，但拆分必须提高计价量',计价黄金克数:plan.payableAu,计价白银克数:plan.payableAg,货柜总数:cs.length,入组柜数:plan.covered,覆盖率:plan.coverage,剩余柜处理:disposition==='single'?'单独结算':'留待下批',生成时间:new Date().toLocaleString()}]);
@@ -221,7 +250,7 @@ export default function App(){
   const manualRows=cs.map(c=>{const gi=plan.groups.findIndex(g=>g.ids.includes(c.id));return{柜号:c.no,人工安排:manual[c.id]||(gi>=0?`组合${gi+1}`:plan.hold.includes(c.id)?'留待下批':'单独结算')}});add('人工调整',manualRows);add('计价与优化规则',[{优化规则JSON:JSON.stringify(goal,null,2),计价规则JSON:JSON.stringify(r,null,2)}]);
   XLSX.writeFile(wb,`废铜金银达标组合_${new Date().toISOString().slice(0,10)}.xlsx`);
  }
- return <main><header className="topbar"><div className="brand"><div className="brandmark"><Boxes size={20}/></div><div><h1>废铜组合销售与结算</h1><p>不计其他扣款，黄金计价量优先</p></div></div><div className="actions"><button className="ghost" onClick={()=>setShowRules(!showRules)}><Settings2 size={16}/>计价规则</button><button className="primary" onClick={exportExcel}><Download size={16}/>导出 Excel</button></div></header><section className="workspace"><aside className="sidebar"><nav>{[['plan','达标方案',Calculator],['data','货柜与点价',Boxes],['compare','结算核对',CircleDollarSign]].map(([k,t,I]:any)=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}><I size={17}/>{t}</button>)}</nav><div className="local"><b>本地保存</b><span>数据仅保存在当前设备</span></div></aside><div className="content"><section className="controls"><div><span className="eyebrow">优化目标</span><div className="target-badge"><CheckCircle2 size={15}/>计价黄金 → 计价白银</div></div><Field label="黄金最低品位 Au g/t" value={goalDraft.auMin} min={0} onChange={v=>setGoalDraft(x=>({...x,auMin:+v}))}/><Field label="白银最低品位 Ag g/t" value={goalDraft.agMin} min={0} onChange={v=>setGoalDraft(x=>({...x,agMin:+v}))}/><Field label="本批最多入组柜数" value={goalDraft.maxGroup} min={2} max={30} onChange={v=>setGoalDraft(x=>({...x,maxGroup:+v}))}/><label className="field"><span>剩余柜处理</span><select value={disposition} onChange={e=>setDisposition(e.target.value as Disposition)}><option value="single">单独结算</option><option value="hold">留待下批</option></select></label><button className="primary update-plan" onClick={applyGoal}><Calculator size={16}/>更新方案</button></section><p className="objective-note"><AlertTriangle size={14}/>推荐按计价黄金总量优先、计价白银总量次之；其他扣款和点价不进入推荐评分。</p>{showRules&&<RulesBuffered r={r} setR={setR}/>} {tab==='plan'&&<PlanView plan={plan} cs={cs}/>} {tab==='data'&&<DataBuffered cs={cs} setCs={setCs}/>} {tab==='compare'&&<Compare plan={plan} cs={cs} r={r} manual={manual} setManual={setManual}/>}</div></section></main>;
+ return <main><header className="topbar"><div className="brand"><div className="brandmark"><Boxes size={20}/></div><div><h1>废铜组合销售与结算</h1><p>不计其他扣款，黄金计价量优先</p></div></div><div className="actions"><button className="ghost" onClick={()=>setShowRules(!showRules)}><Settings2 size={16}/>计价规则</button><button className="primary" onClick={exportExcel}><Download size={16}/>导出 Excel</button></div></header><section className="workspace"><aside className="sidebar"><nav>{[['plan','达标方案',Calculator],['data','货柜与点价',Boxes],['compare','结算核对',CircleDollarSign]].map(([k,t,I]:any)=><button key={k} className={tab===k?'active':''} onClick={()=>setTab(k)}><I size={17}/>{t}</button>)}</nav><div className="local"><b>本地保存</b><span>数据仅保存在当前设备</span></div></aside><div className="content"><section className="controls"><div><span className="eyebrow">优化目标</span><div className="target-badge"><CheckCircle2 size={15}/>计价黄金 → 计价白银</div></div><Field label="黄金最低品位 Au g/t" value={goalDraft.auMin} min={0} onChange={v=>setGoalDraft(x=>({...x,auMin:+v}))}/><Field label="白银最低品位 Ag g/t" value={goalDraft.agMin} min={0} onChange={v=>setGoalDraft(x=>({...x,agMin:+v}))}/><Field label="本批最多入组柜数" value={goalDraft.maxGroup} min={2} max={MAX_CONTAINERS} onChange={v=>setGoalDraft(x=>({...x,maxGroup:+v}))}/><label className="field"><span>剩余柜处理</span><select value={disposition} onChange={e=>setDisposition(e.target.value as Disposition)}><option value="single">单独结算</option><option value="hold">留待下批</option></select></label><button className="primary update-plan" onClick={applyGoal}><Calculator size={16}/>更新方案</button></section><p className="objective-note"><AlertTriangle size={14}/>推荐按计价黄金总量优先、计价白银总量次之；其他扣款和点价不进入推荐评分。</p>{showRules&&<RulesBuffered r={r} setR={setR}/>} {tab==='plan'&&<PlanView plan={plan} cs={cs}/>} {tab==='data'&&<DataBuffered cs={cs} setCs={setCs}/>} {tab==='compare'&&<Compare plan={plan} cs={cs} r={r} manual={manual} setManual={setManual}/>}</div></section></main>;
 }
 
 function allocatedValue(c:C,m:X){return settleCabinet(c,m,m.sn).total}
@@ -233,13 +262,13 @@ function PlanView({plan,cs}:{plan:P;cs:C[]}){
 }
 function LeftList({title,ids,cs,plan}:{title:string;ids:string[];cs:C[];plan:P}){return <article className="list"><div className="listhead"><h3>{title}</h3><span>{ids.length} 柜</span></div>{ids.length?ids.map(id=>{const c=cs.find(x=>x.id===id)!;return <div className="listrow left-reason" key={id}><div><b>{c.no}</b><small>Au {num(c.au,2)} · Ag {num(c.ag,2)}</small></div><span>{plan.leftReasons[id]}</span></div>}):<p className="muted">全部货柜已进入达标组合</p>}</article>}
 
-function DataBuffered({cs,setCs}:{cs:C[];setCs:(v:any)=>void}){const[draft,setDraft]=useState<C[]>(cs),[saved,setSaved]=useState(false);useEffect(()=>setDraft(cs),[cs]);const dirty=JSON.stringify(draft)!==JSON.stringify(cs),upd=(id:string,k:keyof C,v:string)=>{setSaved(false);setDraft(a=>a.map(c=>c.id===id?{...c,[k]:['date','no','note'].includes(k)?v:Number(v)}:c))},add=()=>{setSaved(false);setDraft(a=>a.length>=30?a:[...a,{...demo[0],id:crypto.randomUUID(),no:`A${String(a.length+1).padStart(2,'0')}`,note:''}])},del=(id:string)=>{setSaved(false);setDraft(a=>a.filter(c=>c.id!==id))},reset=()=>{if(confirm('恢复默认示例数据？')){setDraft(demo);setSaved(false)}};return <><Data cs={draft} setCs={setDraft} upd={upd} add={add} del={del} reset={reset}/><div className={`apply-bar ${dirty?'dirty':''}`}><div><b>{dirty?'有尚未应用的数据修改':'货柜数据已应用'}</b><span>{dirty?'输入期间不会触发组合计算，避免页面卡顿。':'方案已使用当前货柜数据计算。'}</span></div><button className="primary" disabled={!dirty} onClick={()=>{setCs(draft);setSaved(true)}}><Calculator size={16}/>{saved?'已更新':'应用数据并更新方案'}</button></div></>}
+function DataBuffered({cs,setCs}:{cs:C[];setCs:(v:any)=>void}){const[draft,setDraft]=useState<C[]>(cs),[saved,setSaved]=useState(false);useEffect(()=>setDraft(cs),[cs]);const dirty=JSON.stringify(draft)!==JSON.stringify(cs),upd=(id:string,k:keyof C,v:string)=>{setSaved(false);setDraft(a=>a.map(c=>c.id===id?{...c,[k]:['date','no','note'].includes(k)?v:Number(v)}:c))},add=()=>{setSaved(false);setDraft(a=>a.length>=MAX_CONTAINERS?a:[...a,{...demo[0],id:crypto.randomUUID(),no:`A${String(a.length+1).padStart(2,'0')}`,note:''}])},del=(id:string)=>{setSaved(false);setDraft(a=>a.filter(c=>c.id!==id))},reset=()=>{if(confirm('恢复默认示例数据？')){setDraft(demo);setSaved(false)}};return <><Data cs={draft} setCs={setDraft} upd={upd} add={add} del={del} reset={reset}/><div className={`apply-bar ${dirty?'dirty':''}`}><div><b>{dirty?'有尚未应用的数据修改':'货柜数据已应用'}</b><span>{dirty?'输入期间不会触发组合计算，避免页面卡顿。':'方案已使用当前货柜数据计算。'}</span></div><button className="primary" disabled={!dirty} onClick={()=>{setCs(draft);setSaved(true)}}><Calculator size={16}/>{saved?'已更新':'应用数据并更新方案'}</button></div></>}
 function Data({cs,setCs,upd,add,del,reset}:any){
  const[paste,setPaste]=useState(''),[replace,setReplace]=useState(false),[message,setMessage]=useState('');const cols:[keyof C,string][]=[['no','柜号'],['tons','吨数'],['cu','Cu%'],['au','Au g/t'],['ag','Ag g/t'],['ni','Ni%'],['sn','Sn%'],['pd','Pd g/t'],['cuPrice','铜价 元/t'],['auPrice','金价 元/g'],['agPrice','银价 元/g'],['pdPrice','钯价 元/g']];
  const aliases:Record<string,keyof C>={'日期':'date','date':'date','柜号':'no','货柜号':'no','no':'no','吨数':'tons','重量':'tons','tons':'tons','cu':'cu','cu%':'cu','铜':'cu','au':'au','au g/t':'au','金':'au','ag':'ag','ag g/t':'ag','银':'ag','ni':'ni','ni%':'ni','镍':'ni','sn':'sn','sn%':'sn','锡':'sn','pd':'pd','pd g/t':'pd','钯':'pd','铜价':'cuPrice','铜价 元/t':'cuPrice','cuprice':'cuPrice','金价':'auPrice','金价 元/g':'auPrice','auprice':'auPrice','银价':'agPrice','银价 元/g':'agPrice','agprice':'agPrice','钯价':'pdPrice','钯价 元/g':'pdPrice','pdprice':'pdPrice','备注':'note','note':'note'};
- function importPaste(){setMessage('');const rows=paste.trim().split(/\r?\n/).map(r=>r.split('\t').map(v=>v.trim())).filter(r=>r.some(Boolean));if(!rows.length){setMessage('请先从 Excel 复制数据并粘贴到上方。');return}const normalized=rows[0].map(v=>v.toLowerCase().replace(/[（(].*?[）)]/g,'').trim()),hasHeader=normalized.some(v=>aliases[v]);const fixed:(keyof C)[]=['date','no','tons','cu','au','ag','ni','sn','pd','cuPrice','auPrice','agPrice','pdPrice','note'];const keys=hasHeader?normalized.map(v=>aliases[v]||null):fixed,data=rows.slice(hasHeader?1:0),defaults=cs[0]||demo[0],imported:C[]=[],errors:string[]=[];data.forEach((row,idx)=>{const raw:any={};keys.forEach((k,i)=>{if(k)raw[k]=row[i]??''});if(!raw.no||!raw.tons){errors.push(`第 ${idx+(hasHeader?2:1)} 行缺少柜号或吨数`);return}const n=(k:keyof C,f=0)=>{const v=String(raw[k]??'').replace(/,/g,'').replace('%','');return v===''?f:Number(v)};const c:C={id:crypto.randomUUID(),date:raw.date||new Date().toISOString().slice(0,10),no:String(raw.no),tons:n('tons'),cu:n('cu'),au:n('au'),ag:n('ag'),ni:n('ni'),sn:n('sn'),pd:n('pd'),cuPrice:n('cuPrice',defaults.cuPrice),auPrice:n('auPrice',defaults.auPrice),agPrice:n('agPrice',defaults.agPrice),pdPrice:n('pdPrice',defaults.pdPrice),note:String(raw.note||'')};if(!Number.isFinite(c.tons)||c.tons<=0||[c.cu,c.au,c.ag,c.ni,c.sn,c.pd,c.cuPrice,c.auPrice,c.agPrice,c.pdPrice].some(v=>!Number.isFinite(v))){errors.push(`第 ${idx+(hasHeader?2:1)} 行含无效数字`);return}imported.push(c)});if((replace?0:cs.length)+imported.length>30){setMessage(`导入后将超过 30 柜，请减少 ${(replace?0:cs.length)+imported.length-30} 行。`);return}if(!imported.length){setMessage(errors.join('；')||'未识别到有效数据。');return}const duplicate=[...(replace?[]:cs.map((c:C)=>c.no)),...imported.map(c=>c.no)].filter((v,i,a)=>a.indexOf(v)!==i);if(duplicate.length){setMessage(`柜号重复：${[...new Set(duplicate)].join('、')}`);return}setPaste('');setMessage(`已导入 ${imported.length} 柜${errors.length?`；另有 ${errors.length} 行未导入`:''}`);(window as any).__setImported?.(imported,replace)}
+ function importPaste(){setMessage('');const rows=paste.trim().split(/\r?\n/).map(r=>r.split('\t').map(v=>v.trim())).filter(r=>r.some(Boolean));if(!rows.length){setMessage('请先从 Excel 复制数据并粘贴到上方。');return}const normalized=rows[0].map(v=>v.toLowerCase().replace(/[（(].*?[）)]/g,'').trim()),hasHeader=normalized.some(v=>aliases[v]);const fixed:(keyof C)[]=['date','no','tons','cu','au','ag','ni','sn','pd','cuPrice','auPrice','agPrice','pdPrice','note'];const keys=hasHeader?normalized.map(v=>aliases[v]||null):fixed,data=rows.slice(hasHeader?1:0),defaults=cs[0]||demo[0],imported:C[]=[],errors:string[]=[];data.forEach((row,idx)=>{const raw:any={};keys.forEach((k,i)=>{if(k)raw[k]=row[i]??''});if(!raw.no||!raw.tons){errors.push(`第 ${idx+(hasHeader?2:1)} 行缺少柜号或吨数`);return}const n=(k:keyof C,f=0)=>{const v=String(raw[k]??'').replace(/,/g,'').replace('%','');return v===''?f:Number(v)};const c:C={id:crypto.randomUUID(),date:raw.date||new Date().toISOString().slice(0,10),no:String(raw.no),tons:n('tons'),cu:n('cu'),au:n('au'),ag:n('ag'),ni:n('ni'),sn:n('sn'),pd:n('pd'),cuPrice:n('cuPrice',defaults.cuPrice),auPrice:n('auPrice',defaults.auPrice),agPrice:n('agPrice',defaults.agPrice),pdPrice:n('pdPrice',defaults.pdPrice),note:String(raw.note||'')};if(!Number.isFinite(c.tons)||c.tons<=0||[c.cu,c.au,c.ag,c.ni,c.sn,c.pd,c.cuPrice,c.auPrice,c.agPrice,c.pdPrice].some(v=>!Number.isFinite(v))){errors.push(`第 ${idx+(hasHeader?2:1)} 行含无效数字`);return}imported.push(c)});if((replace?0:cs.length)+imported.length>MAX_CONTAINERS){setMessage(`导入后将超过 ${MAX_CONTAINERS} 柜，请减少 ${(replace?0:cs.length)+imported.length-MAX_CONTAINERS} 行。`);return}if(!imported.length){setMessage(errors.join('；')||'未识别到有效数据。');return}const duplicate=[...(replace?[]:cs.map((c:C)=>c.no)),...imported.map(c=>c.no)].filter((v,i,a)=>a.indexOf(v)!==i);if(duplicate.length){setMessage(`柜号重复：${[...new Set(duplicate)].join('、')}`);return}setPaste('');setMessage(`已导入 ${imported.length} 柜${errors.length?`；另有 ${errors.length} 行未导入`:''}`);(window as any).__setImported?.(imported,replace)}
  useEffect(()=>{(window as any).__setImported=(items:C[],isReplace:boolean)=>setCs((old:C[])=>isReplace?items:[...old,...items]);return()=>{delete (window as any).__setImported}},[setCs]);
- return <><Title over="原始数据" right={<div className="actions"><button className="ghost" onClick={reset}><RotateCcw size={15}/>恢复示例</button><button className="primary" onClick={add}><Plus size={16}/>逐柜新增</button></div>}>货柜品位与每柜点价</Title><section className="import-card"><div className="import-head"><div className="import-icon"><ClipboardPaste size={19}/></div><div><h3>从 Excel 批量粘贴</h3><p>直接复制 Excel 中的多行数据，保留表头效果最佳</p></div><label className="replace-check"><input type="checkbox" checked={replace} onChange={e=>setReplace(e.target.checked)}/>替换现有货柜</label></div><textarea value={paste} onChange={e=>setPaste(e.target.value)} placeholder={'日期\t柜号\t吨数\tCu%\tAu g/t\tAg g/t\tNi%\tSn%\tPd g/t\t铜价 元/t\t金价 元/g\t银价 元/g\t钯价 元/g\t备注\n2026-09-03\tA07\t24.8\t72.5\t108\t1280\t3.1\t2.27\t4.5\t78500\t790\t9.2\t310\t高锡柜'} /><div className="import-foot"><span>必填：柜号、吨数。未填写点价时沿用首柜价格。</span><div>{paste&&<button className="clear-paste" onClick={()=>{setPaste('');setMessage('')}}><X size={14}/>清空</button>}<button className="primary" onClick={importPaste}><ClipboardPaste size={15}/>识别并导入</button></div></div>{message&&<p className={message.startsWith('已导入')?'import-ok':'import-error'}>{message}</p>}</section><div className="entry-label"><span>方式二 · 逐柜输入</span><small>可直接在表格单元格内修改，最多30柜</small></div><div className="table"><table><thead><tr>{cols.map(c=><th key={c[0]}>{c[1]}</th>)}<th>操作</th></tr></thead><tbody>{cs.map((c:C)=><tr key={c.id}>{cols.map(([k])=><td key={k}><input value={c[k]} onChange={e=>upd(c.id,k,e.target.value)}/></td>)}<td><button className="icon" onClick={()=>del(c.id)}><Trash2 size={15}/></button></td></tr>)}</tbody></table></div><p className="hint"><AlertTriangle size={14}/>Sn＜1%不计；1%–＜2%按（Sn−0.5%）并入铜；Sn≥2%按完整Sn品位并入铜，均按铜价计。</p></>;
+ return <><Title over="原始数据" right={<div className="actions"><button className="ghost" onClick={reset}><RotateCcw size={15}/>恢复示例</button><button className="primary" onClick={add}><Plus size={16}/>逐柜新增</button></div>}>货柜品位与每柜点价</Title><section className="import-card"><div className="import-head"><div className="import-icon"><ClipboardPaste size={19}/></div><div><h3>从 Excel 批量粘贴</h3><p>直接复制 Excel 中的多行数据，保留表头效果最佳</p></div><label className="replace-check"><input type="checkbox" checked={replace} onChange={e=>setReplace(e.target.checked)}/>替换现有货柜</label></div><textarea value={paste} onChange={e=>setPaste(e.target.value)} placeholder={'日期\t柜号\t吨数\tCu%\tAu g/t\tAg g/t\tNi%\tSn%\tPd g/t\t铜价 元/t\t金价 元/g\t银价 元/g\t钯价 元/g\t备注\n2026-09-03\tA07\t24.8\t72.5\t108\t1280\t3.1\t2.27\t4.5\t78500\t790\t9.2\t310\t高锡柜'} /><div className="import-foot"><span>必填：柜号、吨数。未填写点价时沿用首柜价格。</span><div>{paste&&<button className="clear-paste" onClick={()=>{setPaste('');setMessage('')}}><X size={14}/>清空</button>}<button className="primary" onClick={importPaste}><ClipboardPaste size={15}/>识别并导入</button></div></div>{message&&<p className={message.startsWith('已导入')?'import-ok':'import-error'}>{message}</p>}</section><div className="entry-label"><span>方式二 · 逐柜输入</span><small>可直接在表格单元格内修改，最多{MAX_CONTAINERS}柜</small></div><div className="table"><table><thead><tr>{cols.map(c=><th key={c[0]}>{c[1]}</th>)}<th>操作</th></tr></thead><tbody>{cs.map((c:C)=><tr key={c.id}>{cols.map(([k])=><td key={k}><input value={c[k]} onChange={e=>upd(c.id,k,e.target.value)}/></td>)}<td><button className="icon" onClick={()=>del(c.id)}><Trash2 size={15}/></button></td></tr>)}</tbody></table></div><p className="hint"><AlertTriangle size={14}/>Sn＜1%不计；1%–＜2%按（Sn−0.5%）并入铜；Sn≥2%按完整Sn品位并入铜，均按铜价计。</p></>;
 }
 
 function Compare({plan,cs,r,manual,setManual}:{plan:P;cs:C[];r:R;manual:Record<string,string>;setManual:any}){
